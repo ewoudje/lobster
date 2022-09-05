@@ -1,12 +1,9 @@
 - trafficsim.lobster(120): error: can't find specialized superclass for `node`
 
-- `sum` and some other std functions run into the int/float constant warning.
-
 - debugger todo
   - "d" in sample without value?
   - doesn't show some global constants inited?
   - tables column widths: https://github.com/ocornut/imgui/issues/5478
-  - Show file/line for exact current position.
   - Always unfold first stackframe?
   - Mark all stack-frames up to breakpoint (and maybe assert) as no-inline, then increase limits for all other functions?
   - Add custom view for textures, or any resource types..
@@ -233,6 +230,9 @@
   https://github.com/aardappel/lobster/issues/145
 
 - Fix FIXME in Break::Generate
+
+- `sum` and some other std functions have `let init = 0` to work around the int/float constant warning.
+  Can we do something better here?
 
 - One not so nice thing about `::` to create a type scope is that it forces you to declare the type, e.g.
   hof() x: ..       // don't have to declare type of X, derived from `hof` arg.

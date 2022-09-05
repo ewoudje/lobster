@@ -199,6 +199,18 @@ struct TypeChecker {
         Error(callnode, err);
     }
 
+    void AmbiguousOverloadError(const List &call_args, const Function &f, const TypeRef &type0, const vector<int> &from) {
+        string err = "multiple overloads for `" + f.name +"` match the argument types `(";
+        for (size_t a = 0; a < f.nargs(); a++) {
+            if (a != 0) err += ", ";
+            err += TypeName(a ? call_args.children[a]->exptype : type0);
+        }
+        err += ")`";
+        for (auto i: from)
+               err += "\n  overload: " + Signature(*f.overloads[i].sf);
+        Error(call_args, err);
+    }
+
     TypeRef NewTypeVar() {
         auto var = st.NewType();
         *var = Type(V_VAR);
@@ -701,7 +713,8 @@ struct TypeChecker {
             for (auto &f : udt.fields) {
                 if (f.defaultval && f.giventype.utr->t == V_ANY && !predeclaration) {
                     // FIXME: would be good to not call TT here generically but instead have some
-                    // specialized checking, just in case TT has a side effect on type checking.
+                    // specialized checking, just in case TT has a side effect on type checking,
+                    // especially function calls, whose "return from" may fail here.
                     // Sadly that is not easy given the amount of type-checking code this already
                     // relies on.
                     st.bound_typevars_stack.push_back(&udt.generics);
@@ -1512,7 +1525,7 @@ struct TypeChecker {
                         continue;
                     }
                 }
-                Error(call_args, "multiple overloads for ", Q(f.name), " match the argument types");
+                AmbiguousOverloadError(call_args, f, type0, from);
             }
             // Now filter existing matches into a new set of matches based on current arg.
             vector<int> matches;
@@ -2991,7 +3004,9 @@ Node *NativeCall::TypeCheck(TypeChecker &tc, size_t /*reqret*/) {
             }
         }
     }
-    assert(children.size() == nf->args.size());
+    if (children.size() != nf->args.size()) {
+        tc.NatCallError("too many arguments for ", nf, *this);
+    }
     vector<TypeRef> argtypes(children.size());
     for (auto [i, c] : enumerate(children)) {
         auto &arg = nf->args[i];
