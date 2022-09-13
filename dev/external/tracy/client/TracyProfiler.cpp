@@ -57,19 +57,21 @@
 #include <thread>
 
 #include "../common/TracyAlign.hpp"
+#include "../common/TracyAlloc.hpp"
 #include "../common/TracySocket.hpp"
 #include "../common/TracySystem.hpp"
 #include "../common/TracyYield.hpp"
 #include "../common/tracy_lz4.hpp"
 #include "tracy_rpmalloc.hpp"
 #include "TracyCallstack.hpp"
+#include "TracyDebug.hpp"
 #include "TracyDxt1.hpp"
 #include "TracyScoped.hpp"
 #include "TracyProfiler.hpp"
 #include "TracyThread.hpp"
 #include "TracyArmCpuTable.hpp"
 #include "TracySysTrace.hpp"
-#include "../TracyC.h"
+#include "../tracy/TracyC.h"
 
 #ifdef TRACY_PORT
 #  ifndef TRACY_DATA_PORT
@@ -104,7 +106,7 @@ extern "C" typedef BOOL (WINAPI *t_GetLogicalProcessorInformationEx)( LOGICAL_PR
 #endif
 
 #if !defined _WIN32 && ( defined __i386 || defined _M_IX86 || defined __x86_64__ || defined _M_X64 )
-#  include <cpuid.h>
+#  include "TracyCpuid.hpp"
 #endif
 
 #if !( ( defined _WIN32 && _WIN32_WINNT >= _WIN32_WINNT_VISTA ) || defined __linux__ )
@@ -326,7 +328,6 @@ static void InitFailure( const char* msg )
 
 static bool CheckHardwareSupportsInvariantTSC()
 {
-    return true;
     const char* noCheck = GetEnvVar( "TRACY_NO_INVARIANT_CHECK" );
     if( noCheck && noCheck[0] == '1' ) return true;
 
@@ -581,7 +582,7 @@ static const char* GetHostInfo()
 
 #if defined __i386 || defined _M_IX86 || defined __x86_64__ || defined _M_X64
     uint32_t regs[4];
-    char cpuModel[4*4*3];
+    char cpuModel[4*4*3+1] = {};
     auto modelPtr = cpuModel;
     for( uint32_t i=0x80000002; i<0x80000005; ++i )
     {
@@ -1355,6 +1356,7 @@ Profiler::Profiler()
     , m_deferredQueue( 64*1024 )
 #endif
     , m_paramCallback( nullptr )
+    , m_sourceCallback( nullptr )
     , m_queryImage( nullptr )
     , m_queryData( nullptr )
     , m_crashHandlerInstalled( false )
@@ -1444,7 +1446,7 @@ void Profiler::SpawnWorkerThreads()
 #endif
 
 #ifdef TRACY_HAS_CALLSTACK
-    InitCallstack();
+    InitCallstackCritical();
 #endif
 
     m_timeBegin.store( GetTime(), std::memory_order_relaxed );
@@ -1548,7 +1550,9 @@ void Profiler::Worker()
 
     while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
 
+#ifdef TRACY_USE_RPMALLOC
     rpmalloc_thread_initialize();
+#endif
 
     m_exectime = 0;
     const auto execname = GetProcessExecutablePath();
@@ -2020,7 +2024,10 @@ void Profiler::CompressWorker()
     ThreadExitHandler threadExitHandler;
     SetThreadName( "Tracy DXT1" );
     while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+
+#ifdef TRACY_USE_RPMALLOC
     rpmalloc_thread_initialize();
+#endif
 
     for(;;)
     {
@@ -2401,12 +2408,14 @@ Profiler::DequeueStatus Profiler::Dequeue( moodycamel::ConsumerToken& token )
                         tracy_free_fast( (void*)ptr );
 #endif
                         break;
-                    case QueueType::PlotData:
+                    case QueueType::PlotDataInt:
+                    case QueueType::PlotDataFloat:
+                    case QueueType::PlotDataDouble:
                     {
-                        int64_t t = MemRead<int64_t>( &item->plotData.time );
+                        int64_t t = MemRead<int64_t>( &item->plotDataInt.time );
                         int64_t dt = t - refThread;
                         refThread = t;
-                        MemWrite( &item->plotData.time, dt );
+                        MemWrite( &item->plotDataInt.time, dt );
                         break;
                     }
                     case QueueType::ContextSwitch:
@@ -3289,8 +3298,11 @@ void Profiler::SymbolWorker()
 {
     ThreadExitHandler threadExitHandler;
     SetThreadName( "Tracy Symbol Worker" );
-    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+#ifdef TRACY_USE_RPMALLOC
     rpmalloc_thread_initialize();
+#endif
+    InitCallstack();
+    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
 
     for(;;)
     {
@@ -3784,7 +3796,7 @@ void Profiler::HandleParameter( uint64_t payload )
     assert( m_paramCallback );
     const auto idx = uint32_t( payload >> 32 );
     const auto val = int32_t( payload & 0xFFFFFFFF );
-    m_paramCallback( idx, val );
+    m_paramCallback( m_paramCallbackData, idx, val );
     AckServerQuery();
 }
 
@@ -3844,6 +3856,7 @@ void Profiler::HandleSourceCodeQuery()
         if( buildid )
         {
             auto d = debuginfod_find_source( GetDebuginfodClient(), buildid, size, m_queryData, nullptr );
+            TracyDebug( "DebugInfo source query: %s, fn: %s, image: %s\n", d >= 0 ? " ok " : "fail", m_queryData, m_queryImage );
             if( d >= 0 )
             {
                 struct stat st;
@@ -3864,7 +3877,26 @@ void Profiler::HandleSourceCodeQuery()
             }
         }
     }
+    else
+    {
+        TracyDebug( "DebugInfo invalid query fn: %s, image: %s\n", m_queryData, m_queryImage );
+    }
 #endif
+
+    if( !ok && m_sourceCallback )
+    {
+        size_t sz;
+        char* ptr = m_sourceCallback( m_sourceCallbackData, m_queryData, sz );
+        if( ptr )
+        {
+            if( sz < ( TargetFrameSize - 16 ) )
+            {
+                SendLongString( (uint64_t)ptr, ptr, sz, QueueType::SourceCode );
+                ok = true;
+            }
+            tracy_free_fast( ptr );
+        }
+    }
 
     if( !ok ) AckSourceCodeNotAvailable();
 
@@ -4132,9 +4164,44 @@ TRACY_API uint64_t ___tracy_alloc_srcloc_name( uint32_t line, const char* source
     return tracy::Profiler::AllocSourceLocation( line, source, sourceSz, function, functionSz, name, nameSz );
 }
 
+TRACY_API void ___tracy_emit_gpu_zone_begin( const struct ___tracy_gpu_zone_begin_data data )
+{
+    TracyLfqPrepareC( tracy::QueueType::GpuZoneBegin );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuNewContext.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    TracyLfqCommitC;
+}
+
+TRACY_API void ___tracy_emit_gpu_zone_begin_callstack( const struct ___tracy_gpu_zone_begin_callstack_data data )
+{
+    tracy::GetProfiler().SendCallstack( data.depth );
+    TracyLfqPrepareC( tracy::QueueType::GpuZoneBeginCallstack );
+    tracy::MemWrite( &item->gpuZoneBegin.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    TracyLfqCommitC;
+}
+
 TRACY_API void ___tracy_emit_gpu_zone_begin_alloc( const struct ___tracy_gpu_zone_begin_data data )
 {
     TracyLfqPrepareC( tracy::QueueType::GpuZoneBeginAllocSrcLoc  );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuNewContext.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    TracyLfqCommitC;
+}
+
+TRACY_API void ___tracy_emit_gpu_zone_begin_alloc_callstack( const struct ___tracy_gpu_zone_begin_callstack_data data )
+{
+    tracy::GetProfiler().SendCallstack( data.depth );
+    TracyLfqPrepareC( tracy::QueueType::GpuZoneBeginAllocSrcLocCallstack  );
     tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
     tracy::MemWrite( &item->gpuNewContext.thread, tracy::GetThreadHandle() );
     tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
@@ -4187,10 +4254,56 @@ TRACY_API void ___tracy_emit_gpu_context_name( const struct ___tracy_gpu_context
     TracyLfqCommitC;
 }
 
+TRACY_API void ___tracy_emit_gpu_calibration( const struct ___tracy_gpu_calibration_data data )
+{
+    TracyLfqPrepareC( tracy::QueueType::GpuCalibration );
+    tracy::MemWrite( &item->gpuCalibration.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuCalibration.gpuTime, data.gpuTime );
+    tracy::MemWrite( &item->gpuCalibration.cpuDelta, data.cpuDelta );
+    tracy::MemWrite( &item->gpuCalibration.context, data.context );
+    TracyLfqCommitC;
+}
+
+TRACY_API void ___tracy_emit_gpu_zone_begin_serial( const struct ___tracy_gpu_zone_begin_data data )
+{
+    auto item = tracy::Profiler::QueueSerial();
+    tracy::MemWrite( &item->hdr.type, tracy::QueueType::GpuZoneBeginSerial );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    tracy::MemWrite( &item->gpuZoneBegin.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    tracy::Profiler::QueueSerialFinish();
+}
+
+TRACY_API void ___tracy_emit_gpu_zone_begin_callstack_serial( const struct ___tracy_gpu_zone_begin_callstack_data data )
+{
+    auto item = tracy::Profiler::QueueSerialCallstack( tracy::Callstack( data.depth ) );
+    tracy::MemWrite( &item->hdr.type, tracy::QueueType::GpuZoneBeginCallstackSerial );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    tracy::MemWrite( &item->gpuZoneBegin.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    tracy::Profiler::QueueSerialFinish();
+}
+
 TRACY_API void ___tracy_emit_gpu_zone_begin_alloc_serial( const struct ___tracy_gpu_zone_begin_data data )
 {
     auto item = tracy::Profiler::QueueSerial();
     tracy::MemWrite( &item->hdr.type, tracy::QueueType::GpuZoneBeginAllocSrcLocSerial );
+    tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuNewContext.thread, tracy::GetThreadHandle() );
+    tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
+    tracy::MemWrite( &item->gpuZoneBegin.queryId, data.queryId );
+    tracy::MemWrite( &item->gpuZoneBegin.context, data.context );
+    tracy::Profiler::QueueSerialFinish();
+}
+
+TRACY_API void ___tracy_emit_gpu_zone_begin_alloc_callstack_serial( const struct ___tracy_gpu_zone_begin_callstack_data data )
+{
+    auto item = tracy::Profiler::QueueSerialCallstack( tracy::Callstack( data.depth ) );
+    tracy::MemWrite( &item->hdr.type, tracy::QueueType::GpuZoneBeginAllocSrcLocCallstackSerial );
     tracy::MemWrite( &item->gpuZoneBegin.cpuTime, tracy::Profiler::GetTime() );
     tracy::MemWrite( &item->gpuNewContext.thread, tracy::GetThreadHandle() );
     tracy::MemWrite( &item->gpuZoneBegin.srcloc, data.srcloc );
@@ -4244,6 +4357,17 @@ TRACY_API void ___tracy_emit_gpu_context_name_serial( const struct ___tracy_gpu_
     tracy::MemWrite( &item->gpuContextNameFat.context, data.context );
     tracy::MemWrite( &item->gpuContextNameFat.ptr, (uint64_t)ptr );
     tracy::MemWrite( &item->gpuContextNameFat.size, data.len );
+    tracy::Profiler::QueueSerialFinish();
+}
+
+TRACY_API void ___tracy_emit_gpu_calibration_serial( const struct ___tracy_gpu_calibration_data data )
+{
+    auto item = tracy::Profiler::QueueSerial();
+    tracy::MemWrite( &item->hdr.type, tracy::QueueType::GpuCalibration );
+    tracy::MemWrite( &item->gpuCalibration.cpuTime, tracy::Profiler::GetTime() );
+    tracy::MemWrite( &item->gpuCalibration.gpuTime, data.gpuTime );
+    tracy::MemWrite( &item->gpuCalibration.cpuDelta, data.cpuDelta );
+    tracy::MemWrite( &item->gpuCalibration.context, data.context );
     tracy::Profiler::QueueSerialFinish();
 }
 

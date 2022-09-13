@@ -173,5 +173,5 @@
 enum { VATRR_POS, VATRR_NOR, VATRR_TC1, VATRR_COL, VATRR_WEI, VATRR_IDX, VATRR_TC2 };
 
 #if LOBSTER_FRAME_PROFILER
-    #include "TracyOpenGL.hpp"
+    #include "tracy/TracyOpenGL.hpp"
 #endif

@@ -107,7 +107,7 @@ using namespace geom;
 // https://github.com/wolfpld/tracy/issues/419
 // Overhead should be low enough that eventually we want this on in all builds.
 #ifndef LOBSTER_FRAME_PROFILER
-    #define LOBSTER_FRAME_PROFILER 0
+    #define LOBSTER_FRAME_PROFILER 1
 #endif
 
 #if LOBSTER_FRAME_PROFILER && LOBSTER_ENGINE && defined(_WIN32)
@@ -120,8 +120,8 @@ using namespace geom;
     #define LOBSTER_FRAME_PROFILE_THIS_FUNCTION ZoneScoped
     #define LOBSTER_FRAME_PROFILE_GPU(N) TracyGpuZone(N)
     #undef new
-    #include "Tracy.hpp"
-    #include "TracyC.h"
+    #include "tracy/Tracy.hpp"
+    #include "tracy/TracyC.h"
     #if defined(_MSC_VER) && !defined(NDEBUG)
         #define new DEBUG_NEW
     #endif

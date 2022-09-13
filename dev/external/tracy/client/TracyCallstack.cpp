@@ -1,3 +1,4 @@
+#include <limits>
 #include <new>
 #include <stdio.h>
 #include <string.h>
@@ -53,15 +54,39 @@ extern "C"
 #endif
 
 #if TRACY_HAS_CALLSTACK == 2 || TRACY_HAS_CALLSTACK == 3 || TRACY_HAS_CALLSTACK == 4 || TRACY_HAS_CALLSTACK == 5 || TRACY_HAS_CALLSTACK == 6
-extern "C" int ___tracy_demangle( const char* mangled, char* out, size_t len );
+// If you want to use your own demangling functionality (e.g. for another language),
+// define TRACY_DEMANGLE and provide your own implementation of the __tracy_demangle
+// function. The input parameter is a function name. The demangle function must
+// identify whether this name is mangled, and fail if it is not. Failure is indicated
+// by returning nullptr. If demangling succeeds, a pointer to the C string containing
+// demangled function must be returned. The demangling function is responsible for
+// managing memory for this string. It is expected that it will be internally reused.
+// When a call to ___tracy_demangle is made, previous contents of the string memory
+// do not need to be preserved. Function may return string of any length, but the
+// profiler can choose to truncate it.
+extern "C" const char* ___tracy_demangle( const char* mangled );
 
 #ifndef TRACY_DEMANGLE
-extern "C" int ___tracy_demangle( const char* mangled, char* out, size_t len )
+constexpr size_t ___tracy_demangle_buffer_len = 1024*1024; 
+char* ___tracy_demangle_buffer;
+
+void ___tracy_init_demangle_buffer()
 {
-    if( !mangled || mangled[0] != '_' ) return 0;
+    ___tracy_demangle_buffer = (char*)tracy::tracy_malloc( ___tracy_demangle_buffer_len );
+}
+
+void ___tracy_free_demangle_buffer()
+{
+    tracy::tracy_free( ___tracy_demangle_buffer );
+}
+
+extern "C" const char* ___tracy_demangle( const char* mangled )
+{
+    if( !mangled || mangled[0] != '_' ) return nullptr;
+    if( strlen( mangled ) > ___tracy_demangle_buffer_len ) return nullptr;
     int status;
-    abi::__cxa_demangle( mangled, out, &len, &status );
-    return status == 0;
+    size_t len = ___tracy_demangle_buffer_len;
+    return abi::__cxa_demangle( mangled, ___tracy_demangle_buffer, &len, &status );
 }
 #endif
 #endif
@@ -113,9 +138,13 @@ KernelDriver* s_krnlCache = nullptr;
 size_t s_krnlCacheCnt;
 
 
-void InitCallstack()
+void InitCallstackCritical()
 {
     ___tracy_RtlWalkFrameChain = (___tracy_t_RtlWalkFrameChain)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "RtlWalkFrameChain" );
+}
+
+void InitCallstack()
+{
     _SymAddrIncludeInlineTrace = (t_SymAddrIncludeInlineTrace)GetProcAddress( GetModuleHandleA( "dbghelp.dll" ), "SymAddrIncludeInlineTrace" );
     _SymQueryInlineTrace = (t_SymQueryInlineTrace)GetProcAddress( GetModuleHandleA( "dbghelp.dll" ), "SymQueryInlineTrace" );
     _SymFromInlineContext = (t_SymFromInlineContext)GetProcAddress( GetModuleHandleA( "dbghelp.dll" ), "SymFromInlineContext" );
@@ -670,9 +699,70 @@ static void InitKernelSymbols()
 }
 #endif
 
+char* NormalizePath( const char* path )
+{
+    if( path[0] != '/' ) return nullptr;
+
+    const char* ptr = path;
+    const char* end = path;
+    while( *end ) end++;
+
+    char* res = (char*)tracy_malloc( end - ptr + 1 );
+    size_t rsz = 0;
+
+    while( ptr < end )
+    {
+        const char* next = ptr;
+        while( next < end && *next != '/' ) next++;
+        size_t lsz = next - ptr;
+        switch( lsz )
+        {
+        case 2:
+            if( memcmp( ptr, "..", 2 ) == 0 )
+            {
+                const char* back = res + rsz - 1;
+                while( back > res && *back != '/' ) back--;
+                rsz = back - res;
+                ptr = next + 1;
+                continue;
+            }
+            break;
+        case 1:
+            if( *ptr == '.' )
+            {
+                ptr = next + 1;
+                continue;
+            }
+            break;
+        case 0:
+            ptr = next + 1;
+            continue;
+        }
+        if( rsz != 1 ) res[rsz++] = '/';
+        memcpy( res+rsz, ptr, lsz );
+        rsz += lsz;
+        ptr = next + 1;
+    }
+
+    if( rsz == 0 )
+    {
+        memcpy( res, "/", 2 );
+    }
+    else
+    {
+        res[rsz] = '\0';
+    }
+    return res;
+}
+
+void InitCallstackCritical()
+{
+}
+
 void InitCallstack()
 {
     cb_bts = backtrace_create_state( nullptr, 0, nullptr, nullptr );
+    ___tracy_init_demangle_buffer();
 
 #ifdef __linux
     InitKernelSymbols();
@@ -721,6 +811,7 @@ int GetDebugInfoDescriptor( const char* buildid_data, size_t buildid_size, const
     it->filename = (char*)tracy_malloc( fnsz );
     memcpy( it->filename, filename, fnsz );
     it->fd = fd >= 0 ? fd : -1;
+    TracyDebug( "DebugInfo descriptor query: %i, fn: %s\n", fd, filename );
     return it->fd;
 }
 
@@ -746,6 +837,7 @@ debuginfod_client* GetDebuginfodClient()
 
 void EndCallstack()
 {
+    ___tracy_free_demangle_buffer();
 #ifdef TRACY_DEBUGINFOD
     ClearDebugInfoVector( s_di_known );
     debuginfod_end( s_debuginfod );
@@ -802,7 +894,8 @@ static int SymbolAddressDataCb( void* data, uintptr_t pc, uintptr_t lowaddr, con
     }
     else
     {
-        sym.file = CopyString( fn );
+        sym.file = NormalizePath( fn );
+        if( !sym.file ) sym.file = CopyString( fn );
         sym.line = lineno;
         sym.needFree = true;
     }
@@ -842,7 +935,8 @@ static int CodeDataCb( void* data, uintptr_t pc, uintptr_t lowaddr, const char* 
     }
 
     auto& sym = *(CallstackSymbolData*)data;
-    sym.file = CopyString( fn );
+    sym.file = NormalizePath( fn );
+    if( !sym.file ) sym.file = CopyString( fn );
     sym.line = lineno;
     sym.needFree = true;
     sym.symAddr = lowaddr;
@@ -862,9 +956,6 @@ CallstackSymbolData DecodeCodeAddress( uint64_t ptr )
 
 static int CallstackDataCb( void* /*data*/, uintptr_t pc, uintptr_t lowaddr, const char* fn, int lineno, const char* function )
 {
-    enum { DemangleBufLen = 64*1024 };
-    char demangled[DemangleBufLen];
-
     cb_data[cb_num].symLen = 0;
     cb_data[cb_num].symAddr = (uint64_t)lowaddr;
 
@@ -879,20 +970,22 @@ static int CallstackDataCb( void* /*data*/, uintptr_t pc, uintptr_t lowaddr, con
         {
             symname = dlinfo.dli_sname;
             symoff = (char*)pc - (char*)dlinfo.dli_saddr;
-            if( ___tracy_demangle( symname, demangled, DemangleBufLen ) ) symname = demangled;
+            const char* demangled = ___tracy_demangle( symname );
+            if( demangled ) symname = demangled;
         }
 
         if( !symname ) symname = "[unknown]";
 
         if( symoff == 0 )
         {
-            cb_data[cb_num].name = CopyStringFast( symname );
+            const auto len = std::min<size_t>( strlen( symname ), std::numeric_limits<uint16_t>::max() );
+            cb_data[cb_num].name = CopyStringFast( symname, len );
         }
         else
         {
             char buf[32];
             const auto offlen = sprintf( buf, " + %td", symoff );
-            const auto namelen = strlen( symname );
+            const auto namelen = std::min<size_t>( strlen( symname ), std::numeric_limits<uint16_t>::max() - offlen );
             auto name = (char*)tracy_malloc_fast( namelen + offlen + 1 );
             memcpy( name, symname, namelen );
             memcpy( name + namelen, buf, offlen );
@@ -910,13 +1003,16 @@ static int CallstackDataCb( void* /*data*/, uintptr_t pc, uintptr_t lowaddr, con
         {
             function = "[unknown]";
         }
-        else if( ___tracy_demangle( function, demangled, DemangleBufLen ) )
+        else
         {
-            function = demangled;
+            const char* demangled = ___tracy_demangle( function );
+            if( demangled ) function = demangled;
         }
 
-        cb_data[cb_num].name = CopyStringFast( function );
-        cb_data[cb_num].file = CopyStringFast( fn );
+        const auto len = std::min<size_t>( strlen( function ), std::numeric_limits<uint16_t>::max() );
+        cb_data[cb_num].name = CopyStringFast( function, len );
+        cb_data[cb_num].file = NormalizePath( fn );
+        if( !cb_data[cb_num].file ) cb_data[cb_num].file = CopyStringFast( fn );
         cb_data[cb_num].line = lineno;
     }
 
@@ -1000,12 +1096,18 @@ CallstackEntryData DecodeCallstackPtr( uint64_t ptr )
 
 #elif TRACY_HAS_CALLSTACK == 5
 
+void InitCallstackCritical()
+{
+}
+
 void InitCallstack()
 {
+    ___tracy_init_demangle_buffer();
 }
 
 void EndCallstack()
 {
+    ___tracy_free_demangle_buffer();
 }
 
 const char* DecodeCallstackPtrFast( uint64_t ptr )
@@ -1048,9 +1150,6 @@ CallstackEntryData DecodeCallstackPtr( uint64_t ptr )
     static CallstackEntry cb;
     cb.line = 0;
 
-    enum { DemangleBufLen = 64*1024 };
-    char demangled[DemangleBufLen];
-
     const char* symname = nullptr;
     const char* symloc = nullptr;
     auto vptr = (void*)ptr;
@@ -1064,7 +1163,8 @@ CallstackEntryData DecodeCallstackPtr( uint64_t ptr )
         symname = dlinfo.dli_sname;
         symoff = (char*)ptr - (char*)dlinfo.dli_saddr;
         symaddr = dlinfo.dli_saddr;
-        if( ___tracy_demangle( symname, demangled, DemangleBufLen ) ) symname = demangled;
+        const char* demangled = ___tracy_demangle( symname );
+        if( demangled ) symname = demangled;
     }
 
     if( !symname ) symname = "[unknown]";
@@ -1072,13 +1172,14 @@ CallstackEntryData DecodeCallstackPtr( uint64_t ptr )
 
     if( symoff == 0 )
     {
-        cb.name = CopyString( symname );
+        const auto len = std::min<size_t>( strlen( symname ), std::numeric_limits<uint16_t>::max() );
+        cb.name = CopyString( symname, len );
     }
     else
     {
         char buf[32];
         const auto offlen = sprintf( buf, " + %td", symoff );
-        const auto namelen = strlen( symname );
+        const auto namelen = std::min<size_t>( strlen( symname ), std::numeric_limits<uint16_t>::max() - offlen );
         auto name = (char*)tracy_malloc( namelen + offlen + 1 );
         memcpy( name, symname, namelen );
         memcpy( name + namelen, buf, offlen );
