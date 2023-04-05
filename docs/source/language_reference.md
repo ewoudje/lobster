@@ -121,6 +121,8 @@ indlist(e) = indent list(e) [ linefeed ] dedent linefeed
 list(e) = e ... `,`
 
 > in the case of `if a():` wich could be `ident [ call ]` or `exp : body`, when traversing down the if/elif/while/for exp we do not accept the shorthand lambda call.
+>
+> the builtin types int, float, string, any are valid identifiers for function calls.
 
 Types
 -----
