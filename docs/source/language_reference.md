@@ -52,7 +52,7 @@ Lexical definition
 Grammar
 -------
 
-Below, `...` indicates a loop with exit point at that scope level (ex. `(ident ... ,)` -> `(ident (, ident)*)`, * meaning optionaly repeating), 
+Below, `...` indicates a loop with exit point at that scope level (ex. `(ident ... ,)` -> `rule = ident [ , [ rule ] ]`), 
 and `||` is like `|` except indicates a precedence level difference. `[rule]` Means optional. 
 
 program = stats end\_of\_file
