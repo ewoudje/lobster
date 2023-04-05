@@ -77,7 +77,7 @@ vardef = ( `var` \| `let` ) list( ident [ `:` type ] ) `=` opexp
 
 enumdef = ( `enum` | `enum_flags` ) ident `:` indlist( ident [ `=` integer\_constant ] )
 
-functiondef = `def` ident [ generics ] functionargsbody
+functiondef = `def` ident [ generics ] [ `->` type ] functionargsbody
 
 functionargsbody = `(` args `)` `:` body
 
@@ -102,14 +102,13 @@ opexp = unary [ ( `*` \| `/` \| `%` \|\| `+` \| `-` \|\| `<` \| `>` \| `>=` \|
 
 unary = ( `-` \| `++` \| `--` \| \~ \| `not` ) unary \| deref
 
-deref = factor [ `[` exp `]` \| `.` ident [ call ] \| `->` ident
-\| `++` \| `--` \| `is` type ]
+deref = factor [ `[` exp `]` \| `.` ident [ call ] \| `++` \| `--` \| `is` type ]
 
 factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| pakfile string\_constant \| constructor \| `fn` functionargsbody \| ident [ call ]
 
 ctrlflow = `if` ifpart \| (`for` \| `while`) exp `:` body
 
-ifpart = exp `:` body (`else` `:` body \| `elif` `:` ifpart) 
+ifpart = exp `:` body [ `else` `:` body \| `elif` `:` ifpart ] 
 
 constructor = `[` [ list( exp ) ] `]` [ `::` type ] \| ident `{` [ list( ident `:` exp \| exp ] `}`
 
@@ -120,6 +119,8 @@ attrdef = `attribute` ident [ `=` ( string\_constant \| numeric\_constant \| ide
 indlist(e) = indent list(e) [ linefeed ] dedent linefeed
 
 list(e) = e ... `,`
+
+> in the case of `if a():` wich could be `ident [ call ]` or `exp : body`, when traversing down the if/elif/while/for exp we do not accept the shorthand lambda call.
 
 Types
 -----
