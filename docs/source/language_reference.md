@@ -104,7 +104,7 @@ unary = ( `-` \| `++` \| `--` \| \~ \| `not` ) unary \| deref
 
 deref = factor [ `[` exp `]` \| `.` ident [ call ] \| `++` \| `--` \| `is` type ]
 
-factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| pakfile string\_constant \| constructor \| `fn` functionargsbody \| ident [ no_whitespace call \| exp \| call ]
+factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| pakfile string\_constant \| constructor \| `fn` functionargsbody \| ident [ whitespace exp [ block ] \| call ]
 
 ctrlflow = `if` ifpart \| ( `while` | `for` ) exp `:` body \| `for` `(` exp `)` block
 
