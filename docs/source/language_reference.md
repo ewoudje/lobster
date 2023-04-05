@@ -77,9 +77,9 @@ vardef = ( `var` \| `let` ) list( ident [ `:` type ] ) `=` opexp
 
 enumdef = ( `enum` | `enum_flags` ) ident `:` indlist( ident [ `=` integer\_constant ] )
 
-functiondef = `def` ident [ generics ] [ `->` type ] functionargsbody
+functiondef = `def` ident [ generics ] functionargsbody
 
-functionargsbody = `(` args `)` `:` body
+functionargsbody = `(` args `)` [ `->` type ] `:` body
 
 block = [ args ] `:` body \| functionargsbody
 
