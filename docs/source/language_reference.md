@@ -106,7 +106,7 @@ deref = factor [ `[` exp `]` \| `.` ident [ call ] \| `++` \| `--` \| `is` type 
 
 factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| pakfile string\_constant \| constructor \| `fn` functionargsbody \| ident [ call ]
 
-ctrlflow = `if` ifpart \| (`for` \| `while`) exp `:` body
+ctrlflow = `if` ifpart \| ( `while` | `for` ) exp `:` body \| `for` `(` exp `)` block
 
 ifpart = exp `:` body [ `else` `:` body \| `elif` `:` ifpart ] 
 
