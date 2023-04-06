@@ -104,9 +104,11 @@ unary = ( `-` \| `++` \| `--` \| \~ \| `not` ) unary \| deref
 
 deref = factor [ `[` exp `]` \| `.` ident [ call ] \| `++` \| `--` \| `is` type ]
 
-factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| `pakfile` string\_constant \| `typeof` type \| constructor \| `fn` functionargsbody \| ident [ whitespace exp [ block ] \| call ]
+factor = constant \| `(` exp `)` \| `super` \| ctrlflow \| `pakfile` string\_constant 
+\| `typeof` type \| constructor \| `fn` functionargsbody \| ident [ whitespace exp [ block ] \| call ]
 
-ctrlflow = `if` ifpart \| ( `while` | `for` ) exp `:` body \| `for` `(` exp `)` block
+ctrlflow = `if` ifpart \| ( `while` | `for` ) exp `:` body \| `for` `(` exp `)` block 
+\| `switch` exp `:` indlist(`case` list(unary) `:` body \| `default` `:` body)
 
 ifpart = exp `:` body [ `else` `:` body \| `elif` `:` ifpart ] 
 
