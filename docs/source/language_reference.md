@@ -87,8 +87,8 @@ args = [ list( ident [ ( `:` \| `::` ) type ] [ `=` exp ] ) ]
 
 body = ( expstat \| indent stats dedent )
 
-type = `int` \| `float` \| `string` \| `[` type `]` \| `resource` `<` ident `>` \| `void` 
-\| ident [ specializers ]
+type = ( `int` \| `float` \| `string` \| `[` type `]` \| `resource` `<` ident `>` \| `void` 
+\| ident [ specializers ] ) [ `?` ]
 
 call = [ specializers ] `(` [ list( exp ) ] `)` [ block [ `fn` block … ] ]
 
